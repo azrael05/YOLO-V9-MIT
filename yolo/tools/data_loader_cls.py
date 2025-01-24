@@ -3,6 +3,8 @@ from queue import Empty, Queue
 from statistics import mean
 from threading import Event, Thread
 from typing import Generator, List, Tuple, Union
+from collections import Counter
+import torchvision
 
 import numpy as np
 import torch
@@ -15,17 +17,18 @@ from yolo.config.config import DataConfig, DatasetConfig
 from yolo.tools.data_augmentation import *
 from yolo.tools.data_augmentation import AugmentationComposer
 from yolo.tools.dataset_preparation import prepare_dataset
-from yolo.utils.dataset_utils import (
+from yolo.utils.dataset_utils_cls import (
     create_image_metadata,
-    locate_label_paths,
+    locate_label_paths_cls,
     scale_segmentation,
     tensorlize,
 )
 from yolo.utils.logger import logger
 
 
-class YoloDataset(Dataset):
-    def __init__(self, data_cfg: DataConfig, dataset_cfg: DatasetConfig, phase: str = "train2017"):
+class YoloDataset_CLS(Dataset):
+    def __init__(self, data_cfg: DataConfig, dataset_cfg: DatasetConfig, phase: str = "train2017", converter_dict={}):
+        self.converter_dict = converter_dict
         augment_cfg = data_cfg.data_augment
         self.image_size = data_cfg.image_size
         phase_name = dataset_cfg.get(phase, phase)
@@ -34,9 +37,10 @@ class YoloDataset(Dataset):
         self.base_size = mean(self.image_size)
 
         transforms = [eval(aug)(prob) for aug, prob in augment_cfg.items()]
-        self.transform = AugmentationComposer(transforms, self.image_size, self.base_size)
-        self.transform.get_more_data = self.get_more_data
-        self.img_paths, self.bboxes, self.ratios = tensorlize(self.load_data(Path(dataset_cfg.path), phase_name))
+        # self.transform = 
+        # self.transform = AugmentationComposer(transforms, self.image_size, self.base_size)
+        # self.transform.get_more_data = self.get_more_data
+        self.loaded_dataset = self.load_data(Path(dataset_cfg.path), phase_name)
 
     def load_data(self, dataset_path: Path, phase_name: str):
         """
@@ -53,8 +57,9 @@ class YoloDataset(Dataset):
 
         if not cache_path.exists():
             logger.info(f":factory: Generating {phase_name} cache")
-            data = self.filter_data(dataset_path, phase_name, self.dynamic_shape)
+            data, self.converter_dict = self.filter_data(dataset_path, phase_name, self.dynamic_shape, self.converter_dict)
             torch.save(data, cache_path)
+
         else:
             try:
                 data = torch.load(cache_path, weights_only=False)
@@ -68,7 +73,7 @@ class YoloDataset(Dataset):
             logger.info(f":package: Loaded {phase_name} cache")
         return data
 
-    def filter_data(self, dataset_path: Path, phase_name: str, sort_image: bool = False) -> list:
+    def filter_data(self, dataset_path: Path, phase_name: str, sort_image: bool = False, converter_dict={}) -> list:
         """
         Filters and collects dataset information by pairing images with their corresponding labels.
 
@@ -81,48 +86,8 @@ class YoloDataset(Dataset):
             list: A list of tuples, each containing the path to an image file and its associated segmentation as a tensor.
         """
         images_path = dataset_path / "images" / phase_name
-        labels_path, data_type = locate_label_paths(dataset_path, phase_name)
-        images_list = sorted([p.name for p in Path(images_path).iterdir() if p.is_file()])
-        if data_type == "json":
-            annotations_index, image_info_dict = create_image_metadata(labels_path)
-
-        data = []
-        valid_inputs = 0
-        for image_name in track(images_list, description="Filtering data"):
-            if not image_name.lower().endswith((".jpg", ".jpeg", ".png")):
-                continue
-            image_id = Path(image_name).stem
-
-            if data_type == "json":
-                image_info = image_info_dict.get(image_id, None)
-                if image_info is None:
-                    continue
-                annotations = annotations_index.get(image_info["id"], [])
-                image_seg_annotations = scale_segmentation(annotations, image_info)
-            elif data_type == "txt":
-                label_path = labels_path / f"{image_id}.txt"
-                if not label_path.is_file():
-                    continue
-                with open(label_path, "r") as file:
-                    image_seg_annotations = [list(map(float, line.strip().split())) for line in file]
-            else:
-                image_seg_annotations = []
-
-            labels = self.load_valid_labels(image_id, image_seg_annotations)
-
-            img_path = images_path / image_name
-            if sort_image:
-                with Image.open(img_path) as img:
-                    width, height = img.size
-            else:
-                width, height = 0, 1
-            data.append((img_path, labels, width / height))
-            valid_inputs += 1
-
-        data = sorted(data, key=lambda x: x[2], reverse=True)
-
-        logger.info(f"Recorded {valid_inputs}/{len(images_list)} valid inputs")
-        return data
+        dataset_files, converter_dict = locate_label_paths_cls(images_path, converter_dict)
+        return dataset_files, converter_dict
 
     def load_valid_labels(self, label_path: str, seg_data_one_img: list) -> Union[Tensor, None]:
         """
@@ -152,38 +117,45 @@ class YoloDataset(Dataset):
             return torch.zeros((0, 5))
 
     def get_data(self, idx):
-        img_path, bboxes = self.img_paths[idx], self.bboxes[idx]
-        valid_mask = bboxes[:, 0] != -1
-        with Image.open(img_path) as img:
-            img = img.convert("RGB")
-        return img, torch.from_numpy(bboxes[valid_mask]), img_path
+        """Return data at idx index
+        
+        :param idx: the index
+        :type idx: int
+        :returns: the image, image_path, label
+        :rtype: Tuple[Image, str, str]
+        """
+        img_path, label = self.loaded_dataset[idx][0], self.loaded_dataset[idx][1]
+        # with Image.open(img_path) as img:
+        #     img = img.convert("RGB")
+        img = torchvision.io.read_image(img_path)
+        transformer = torchvision.transforms.Resize([640,640])
+        img = transformer(img)
+        img = img/255
+        return img,  img_path, label
 
-    def get_more_data(self, num: int = 1):
-        indices = torch.randint(0, len(self), (num,))
-        return [self.get_data(idx)[:2] for idx in indices]
+    # def get_more_data(self, num: int = 1):
+    #     indices = torch.randint(0, len(self), (num,))
+    #     return [self.get_data(idx)[:2] for idx in indices]
 
-    def _update_image_size(self, idx: int) -> None:
-        """Update image size based on dynamic shape and batch settings."""
-        batch_start_idx = (idx // self.batch_size) * self.batch_size
-        image_ratio = self.ratios[batch_start_idx].clip(1 / 3, 3)
-        shift = ((self.base_size / 32 * (image_ratio - 1)) // (image_ratio + 1)) * 32
+    # def _update_image_size(self, idx: int) -> None:
+    #     """Update image size based on dynamic shape and batch settings."""
+    #     batch_start_idx = (idx // self.batch_size) * self.batch_size
+    #     image_ratio = self.ratios[batch_start_idx].clip(1 / 3, 3)
+    #     shift = ((self.base_size / 32 * (image_ratio - 1)) // (image_ratio + 1)) * 32
 
-        self.image_size = [int(self.base_size + shift), int(self.base_size - shift)]
-        self.transform.pad_resize.set_size(self.image_size)
+    #     self.image_size = [int(self.base_size + shift), int(self.base_size - shift)]
+    #     self.transform.pad_resize.set_size(self.image_size)
 
     def __getitem__(self, idx) -> Tuple[Image.Image, Tensor, Tensor, List[str]]:
-        img, bboxes, img_path = self.get_data(idx)
+        # img, bboxes, img_path = self.get_data(idx)
+        img, img_path, label = self.get_data(idx)
 
-        if self.dynamic_shape:
-            self._update_image_size(idx)
+        # transformed_img = self.transform(img)
 
-        img, bboxes, rev_tensor = self.transform(img, bboxes)
-        bboxes[:, [1, 3]] *= self.image_size[0]
-        bboxes[:, [2, 4]] *= self.image_size[1]
-        return img, bboxes, rev_tensor, img_path
+        return img, label
 
     def __len__(self) -> int:
-        return len(self.bboxes)
+        return len(self.loaded_dataset)
 
 
 def collate_fn(batch: List[Tuple[Tensor, Tensor]]) -> Tuple[Tensor, List[Tensor]]:
@@ -217,19 +189,14 @@ def collate_fn(batch: List[Tuple[Tensor, Tensor]]) -> Tuple[Tensor, List[Tensor]
 
 
 def create_dataloader(data_cfg: DataConfig, dataset_cfg: DatasetConfig, task: str = "train"):
-    if task == "inference":
-        return StreamDataLoader(data_cfg)
 
-    if getattr(dataset_cfg, "auto_download", False):
-        prepare_dataset(dataset_cfg, task)
-    dataset = YoloDataset(data_cfg, dataset_cfg, task)
+    dataset = YoloDataset_CLS(data_cfg, dataset_cfg, task)
 
     return DataLoader(
         dataset,
         batch_size=data_cfg.batch_size,
         num_workers=data_cfg.cpu_num,
         pin_memory=data_cfg.pin_memory,
-        # collate_fn=collate_fn,
     )
 
 

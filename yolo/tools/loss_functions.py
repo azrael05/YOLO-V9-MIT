@@ -4,6 +4,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 from torch.nn import BCEWithLogitsLoss
+from torch.nn import CrossEntropyLoss
 
 from yolo.config.config import Config, LossConfig
 from yolo.utils.bounding_box_utils import BoxMatcher, Vec2Box, calculate_iou
@@ -138,5 +139,10 @@ class DualLoss:
 def create_loss_function(cfg: Config, vec2box) -> DualLoss:
     # TODO: make it flexible, if cfg doesn't contain aux, only use SingleLoss
     loss_function = DualLoss(cfg, vec2box)
+    logger.info(":white_check_mark: Success load loss function")
+    return loss_function
+
+def create_loss_function_cls(cfg: Config) -> CrossEntropyLoss:
+    loss_function = CrossEntropyLoss()
     logger.info(":white_check_mark: Success load loss function")
     return loss_function

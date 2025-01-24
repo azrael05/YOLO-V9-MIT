@@ -9,29 +9,32 @@ sys.path.append(str(project_root))
 
 from yolo.config.config import Config
 from yolo.tools.solver import InferenceModel, TrainModel, ValidateModel
+from yolo.tools.solver_cls import TrainModel_CLS, InferenceModel_CLS, ValidateModel_CLS
 from yolo.utils.logging_utils import setup
 
 
 @hydra.main(config_path="config", config_name="config", version_base=None)
 def main(cfg: Config):
     callbacks, loggers, save_path = setup(cfg)
+    callbacks = []
 
+    if "cls" in cfg.model.name:
+        cfg.weight = ""
     trainer = Trainer(
         accelerator="auto",
         max_epochs=getattr(cfg.task, "epoch", None),
-        precision="16-mixed",
+        precision="32",
         callbacks=callbacks,
         logger=loggers,
         log_every_n_steps=1,
         gradient_clip_val=10,
         gradient_clip_algorithm="value",
         deterministic=True,
-        enable_progress_bar=not getattr(cfg, "quite", False),
+        # enable_progress_bar=not getattr(cfg, "quite", False),
         default_root_dir=save_path,
     )
-
     if cfg.task.task == "train":
-        model = TrainModel(cfg)
+        model = TrainModel_CLS(cfg)
         trainer.fit(model)
     if cfg.task.task == "validation":
         model = ValidateModel(cfg)

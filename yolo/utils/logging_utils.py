@@ -211,16 +211,14 @@ class ImageLogger(Callback):
     def on_validation_batch_end(self, trainer: Trainer, pl_module, outputs, batch, batch_idx) -> None:
         if batch_idx != 0:
             return
-        batch_size, images, targets, rev_tensor, img_paths = batch
-        gt_boxes = targets[0] if targets.ndim == 3 else targets
-        pred_boxes = outputs[0] if isinstance(outputs, list) else outputs
-        images = [images[0]]
-        step = trainer.current_epoch
-        for logger in trainer.loggers:
-            if isinstance(logger, WandbLogger):
-                logger.log_image("Input Image", images, step=step)
-                logger.log_image("Ground Truth", images, step=step, boxes=[log_bbox(gt_boxes)])
-                logger.log_image("Prediction", images, step=step, boxes=[log_bbox(pred_boxes)])
+        # image, target = batch
+        # images = [images[0]]
+        # step = trainer.current_epoch
+        # for logger in trainer.loggers:
+        #     if isinstance(logger, WandbLogger):
+        #         logger.log_image("Input Image", images, step=step)
+        #         logger.log_image("Ground Truth", images, step=step, boxes=[log_bbox(gt_boxes)])
+        #         logger.log_image("Prediction", images, step=step, boxes=[log_bbox(pred_boxes)])
 
 
 def setup_logger(logger_name, quite=False):
