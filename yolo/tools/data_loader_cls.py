@@ -12,34 +12,33 @@ from PIL import Image
 from rich.progress import track
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
+import cv2
+
 
 from yolo.config.config import DataConfig, DatasetConfig
 from yolo.tools.data_augmentation import *
 from yolo.tools.data_augmentation import AugmentationComposer
 from yolo.tools.dataset_preparation import prepare_dataset
 from yolo.utils.dataset_utils_cls import (
-    create_image_metadata,
     locate_label_paths_cls,
-    scale_segmentation,
-    tensorlize,
+
 )
 from yolo.utils.logger import logger
 
 
 class YoloDataset_CLS(Dataset):
-    def __init__(self, data_cfg: DataConfig, dataset_cfg: DatasetConfig, phase: str = "train2017", converter_dict={}):
+    def __init__(self, data_cfg: DataConfig, dataset_cfg: DatasetConfig, phase: str = "train", converter_dict={}):
         self.converter_dict = converter_dict
-        augment_cfg = data_cfg.data_augment
+
+        ## TODO ADD AUGMENTATION
+        # augment_cfg = data_cfg.data_augment
         self.image_size = data_cfg.image_size
         phase_name = dataset_cfg.get(phase, phase)
         self.batch_size = data_cfg.batch_size
         self.dynamic_shape = getattr(data_cfg, "dynamic_shape", False)
         self.base_size = mean(self.image_size)
+        self.transforms = torchvision.transforms.Resize([112,112])
 
-        transforms = [eval(aug)(prob) for aug, prob in augment_cfg.items()]
-        # self.transform = 
-        # self.transform = AugmentationComposer(transforms, self.image_size, self.base_size)
-        # self.transform.get_more_data = self.get_more_data
         self.loaded_dataset = self.load_data(Path(dataset_cfg.path), phase_name)
 
     def load_data(self, dataset_path: Path, phase_name: str):
@@ -57,7 +56,7 @@ class YoloDataset_CLS(Dataset):
 
         if not cache_path.exists():
             logger.info(f":factory: Generating {phase_name} cache")
-            data, self.converter_dict = self.filter_data(dataset_path, phase_name, self.dynamic_shape, self.converter_dict)
+            data = self.filter_data(dataset_path, phase_name, self.dynamic_shape, self.converter_dict)
             torch.save(data, cache_path)
 
         else:
@@ -86,35 +85,8 @@ class YoloDataset_CLS(Dataset):
             list: A list of tuples, each containing the path to an image file and its associated segmentation as a tensor.
         """
         images_path = dataset_path / "images" / phase_name
-        dataset_files, converter_dict = locate_label_paths_cls(images_path, converter_dict)
-        return dataset_files, converter_dict
-
-    def load_valid_labels(self, label_path: str, seg_data_one_img: list) -> Union[Tensor, None]:
-        """
-        Loads valid COCO style segmentation data (values between [0, 1]) and converts it to bounding box coordinates
-        by finding the minimum and maximum x and y values.
-
-        Parameters:
-            label_path (str): The filepath to the label file containing annotation data.
-            seg_data_one_img (list): The actual list of annotations (in segmentation format)
-
-        Returns:
-            Tensor or None: A tensor of all valid bounding boxes if any are found; otherwise, None.
-        """
-        bboxes = []
-        for seg_data in seg_data_one_img:
-            cls = seg_data[0]
-            points = np.array(seg_data[1:]).reshape(-1, 2)
-            valid_points = points[(points >= 0) & (points <= 1)].reshape(-1, 2)
-            if valid_points.size > 1:
-                bbox = torch.tensor([cls, *valid_points.min(axis=0), *valid_points.max(axis=0)])
-                bboxes.append(bbox)
-
-        if bboxes:
-            return torch.stack(bboxes)
-        else:
-            logger.warning(f"No valid BBox in {label_path}")
-            return torch.zeros((0, 5))
+        dataset_files, self.converter_dict = locate_label_paths_cls(images_path, converter_dict)
+        return dataset_files
 
     def get_data(self, idx):
         """Return data at idx index
@@ -125,14 +97,11 @@ class YoloDataset_CLS(Dataset):
         :rtype: Tuple[Image, str, str]
         """
         img_path, label = self.loaded_dataset[idx][0], self.loaded_dataset[idx][1]
-        # with Image.open(img_path) as img:
-        #     img = img.convert("RGB")
-        img = torchvision.io.read_image(img_path)
-        transformer = torchvision.transforms.Resize([640,640])
-        img = transformer(img)
-        img = img/255
-        return img,  img_path, label
 
+        img = torchvision.io.read_image(img_path)
+        return img, label
+
+    ## TODO Add augmentation to generate more data
     # def get_more_data(self, num: int = 1):
     #     indices = torch.randint(0, len(self), (num,))
     #     return [self.get_data(idx)[:2] for idx in indices]
@@ -147,49 +116,19 @@ class YoloDataset_CLS(Dataset):
     #     self.transform.pad_resize.set_size(self.image_size)
 
     def __getitem__(self, idx) -> Tuple[Image.Image, Tensor, Tensor, List[str]]:
-        # img, bboxes, img_path = self.get_data(idx)
-        img, img_path, label = self.get_data(idx)
-
-        # transformed_img = self.transform(img)
+        """Get the image and label at idx"""
+        img, label = self.get_data(idx)
+        
+        img = self.transforms(img)
+        img = img/255
 
         return img, label
 
     def __len__(self) -> int:
         return len(self.loaded_dataset)
 
-
-def collate_fn(batch: List[Tuple[Tensor, Tensor]]) -> Tuple[Tensor, List[Tensor]]:
-    """
-    A collate function to handle batching of images and their corresponding targets.
-
-    Args:
-        batch (list of tuples): Each tuple contains:
-            - image (Tensor): The image tensor.
-            - labels (Tensor): The tensor of labels for the image.
-
-    Returns:
-        Tuple[Tensor, List[Tensor]]: A tuple containing:
-            - A tensor of batched images.
-            - A list of tensors, each corresponding to bboxes for each image in the batch.
-    """
-    batch_size = len(batch)
-    target_sizes = [item[1].size(0) for item in batch]
-    # TODO: Improve readability of these process
-    # TODO: remove maxBbox or reduce loss function memory usage
-    batch_targets = torch.zeros(batch_size, min(max(target_sizes), 100), 5)
-    batch_targets[:, :, 0] = -1
-    for idx, target_size in enumerate(target_sizes):
-        batch_targets[idx, : min(target_size, 100)] = batch[idx][1][:100]
-
-    batch_images, _, batch_reverse, batch_path = zip(*batch)
-    batch_images = torch.stack(batch_images)
-    batch_reverse = torch.stack(batch_reverse)
-
-    return batch_size, batch_images, batch_targets, batch_reverse, batch_path
-
-
-def create_dataloader(data_cfg: DataConfig, dataset_cfg: DatasetConfig, task: str = "train"):
-
+def create_dataloader_cls(data_cfg: DataConfig, dataset_cfg: DatasetConfig, task: str = "train"):
+    """Create Yolo classification dataset"""
     dataset = YoloDataset_CLS(data_cfg, dataset_cfg, task)
 
     return DataLoader(
@@ -210,7 +149,6 @@ class StreamDataLoader:
         self.stop_event = Event()
 
         if self.is_stream:
-            import cv2
 
             self.cap = cv2.VideoCapture(self.source)
         else:
@@ -242,7 +180,6 @@ class StreamDataLoader:
         self.process_frame(image)
 
     def load_video_file(self, video_path):
-        import cv2
 
         cap = cv2.VideoCapture(str(video_path))
         while self.running:
@@ -255,7 +192,6 @@ class StreamDataLoader:
     def process_frame(self, frame):
         if isinstance(frame, np.ndarray):
             # TODO: we don't need cv2
-            import cv2
 
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             frame = Image.fromarray(frame)

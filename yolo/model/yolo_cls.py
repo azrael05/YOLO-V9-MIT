@@ -11,7 +11,7 @@ from yolo.tools.dataset_preparation import prepare_weight
 from yolo.utils.logger import logger
 from yolo.utils.module_utils import get_layer_map
 
-
+from yolo.model.yolo import YOLO
 class YOLO_CLS(nn.Module):
     """
     A preliminary YOLO (You Only Look Once) model class still under development.

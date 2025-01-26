@@ -3,27 +3,26 @@ from pathlib import Path
 
 from lightning import LightningModule
 from torchmetrics.detection import MeanAveragePrecision
+from sklearn.metrics import accuracy_score
+import numpy as np
+from tqdm import tqdm
+import torch
 
 from yolo.config.config import Config
-# from yolo.model.yolo import create_model
+from yolo.model.yolo import create_model
 from yolo.model.yolo_cls import create_model_cls
-from yolo.tools.data_loader_cls import create_dataloader
+from yolo.tools.data_loader_cls import create_dataloader_cls
 from yolo.tools.drawer import draw_bboxes
 from yolo.tools.loss_functions import  create_loss_function_cls
 from yolo.utils.bounding_box_utils import create_converter, to_metrics_format
 from yolo.utils.model_utils import PostProcess, create_optimizer, create_scheduler
+import datetime
+from yolo.tools.solver import BaseModel
+import logging
+logger = logging.getLogger("timer")
+logging.basicConfig(filename=r"logs\timer.txt", filemode="a")
 
-
-class BaseModel_CLS(LightningModule):
-    def __init__(self, cfg: Config):
-        super().__init__()
-        self.model = create_model_cls(cfg.model, class_num=cfg.dataset.class_num, weight_path=cfg.weight)
-
-    def forward(self, x):
-        return self.model(x)
-
-
-class ValidateModel_CLS(BaseModel_CLS):
+class ValidateModel_CLS(BaseModel):
     def __init__(self, cfg: Config):
         super().__init__(cfg)
         self.cfg = cfg
@@ -31,25 +30,14 @@ class ValidateModel_CLS(BaseModel_CLS):
             self.validation_cfg = self.cfg.task
         else:
             self.validation_cfg = self.cfg.task.validation
-        # self.metric = MeanAveragePrecision(iou_type="bbox", box_format="xyxy", backend="faster_coco_eval")
-        # self.metric.warn_on_many_detections = False
-        self.val_loader = create_dataloader(self.validation_cfg.data, self.cfg.dataset, self.validation_cfg.task)
-        print("Length of validation",len(self.val_loader))
+        self.val_loader = create_dataloader_cls(self.validation_cfg.data, self.cfg.dataset, self.validation_cfg.task)
         self.ema = self.model
-
-    def setup(self, stage):
-        # self.vec2box = create_converter(
-        #     self.cfg.model.name, self.model, self.cfg.model.anchor, self.cfg.image_size, self.device
-        # )
-        self.post_process = PostProcess(self.vec2box, self.validation_cfg.nms)
-
     def val_dataloader(self):
         return self.val_loader
 
     def validation_step(self, batch, batch_idx):
         images, targets = batch
         H, W = images.shape[2:]
-        # predicts = self.post_process(self.ema(images), image_size=[W, H])
         predicts = self.ema(images)
         # self.metric.update(
         #     [to_metrics_format(predict) for predict in predicts], [to_metrics_format(target) for target in targets]
@@ -73,15 +61,18 @@ class TrainModel_CLS(ValidateModel_CLS):
     def __init__(self, cfg: Config):
         super().__init__(cfg)
         self.cfg = cfg
-        self.train_loader = create_dataloader(self.cfg.task.data, self.cfg.dataset, self.cfg.task.task)
+        start = datetime.datetime.now()
+        self.train_loader = create_dataloader_cls(self.cfg.task.data, self.cfg.dataset, self.cfg.task.task)
+        time_taken = datetime.datetime.now() - start
+        logger.critical(f"Dataloader creation time{time_taken}")
         print(len(self.train_loader))
-
-    def setup(self, stage):
-        # super().setup(stage)
-        self.loss_fn = create_loss_function_cls(self.cfg)
 
     def train_dataloader(self):
         return self.train_loader
+    
+    def setup(self, stage):
+        # super().setup(stage)
+        self.loss_fn = create_loss_function_cls(self.cfg)
 
     def on_train_epoch_start(self):
         self.trainer.optimizers[0].next_epoch(
@@ -93,44 +84,69 @@ class TrainModel_CLS(ValidateModel_CLS):
         images, targets= batch
         predicts = self(images)
         batch_size = len(images)
-        print(predicts["Main"], targets)
         loss = self.loss_fn(predicts["Main"], targets)
-        # self.log_dict(
-        #     loss_item,
-        #     prog_bar=True,
-        #     on_epoch=True,
-        #     batch_size=batch_size,
-        #     rank_zero_only=True,
-        # )
-        # self.log_dict(lr_dict, prog_bar=False, logger=True, on_epoch=False, rank_zero_only=True)
+        self.log_dict(
+            loss,
+            prog_bar=True,
+            on_epoch=True,
+            batch_size=batch_size,
+            rank_zero_only=True,
+        )
+        self.log_dict(lr_dict, prog_bar=False, logger=True, on_epoch=False, rank_zero_only=True)
         return loss * batch_size
 
     def configure_optimizers(self):
         optimizer = create_optimizer(self.model, self.cfg.task.optimizer)
         scheduler = create_scheduler(optimizer, self.cfg.task.scheduler)
         return [optimizer], [scheduler]
+    
+    # def train(self):
+    #     optimizer = self.configure_optimizers()[0]
+    #     epochs = 5
+    #     print(self.train_dataloader)
+    #     loss_fn = create_loss_function_cls(self.cfg)
+    #     self.model.train()
+    #     for epoch in range(epochs): 
+    #         start = datetime.datetime.now()
+    #         print("Start time of epoch", datetime.datetime.now())
+
+    #         actual = []
+    #         preds = []
+    #         for index, batch in tqdm(enumerate(self.train_loader), desc="Files processed"):
+    #             images, labels = batch
+    #             for label in labels:
+    #                 actual.append(np.argmax(label))
+    #             predictions = self(images)["Main"]
+    #             for prediction in predictions:
+    #                 preds.append(np.argmax(prediction.detach().numpy()))
+    #             loss = loss_fn(predictions, labels)
+    #             batch_size = len(labels)
+    #             loss = loss*batch_size
+    #             loss.backward()
+    #             optimizer.step()
+    #         print(accuracy_score(actual, preds))
+    #         end_time = datetime.datetime.now()
+    #         print("Duration of epoch", end_time-start)
+    #         print("End time of epoch", end_time)
 
 
-class InferenceModel_CLS(BaseModel_CLS):
+
+class InferenceModel_CLS(BaseModel):
     def __init__(self, cfg: Config):
         super().__init__(cfg)
         self.cfg = cfg
         # TODO: Add FastModel
-        self.predict_loader = create_dataloader(cfg.task.data, cfg.dataset, cfg.task.task)
-
-    def setup(self, stage):
-        self.vec2box = create_converter(
-            self.cfg.model.name, self.model, self.cfg.model.anchor, self.cfg.image_size, self.device
-        )
-        self.post_process = PostProcess(self.vec2box, self.cfg.task.nms)
+        self.predict_loader = create_dataloader_cls(cfg.task.data, cfg.dataset, cfg.task.task)
 
     def predict_dataloader(self):
         return self.predict_loader
 
     def predict_step(self, batch, batch_idx):
-        images, rev_tensor, origin_frame = batch
-        predicts = self.post_process(self(images), rev_tensor=rev_tensor)
-        img = draw_bboxes(origin_frame, predicts, idx2label=self.cfg.dataset.class_list)
+        images, labels = batch
+        scores = self(images)
+        predicts = torch.argmax(scores, dim=0)
+        return predicts
+        
         if getattr(self.predict_loader, "is_stream", None):
             fps = self._display_stream(img)
         else:
@@ -138,8 +154,3 @@ class InferenceModel_CLS(BaseModel_CLS):
         if getattr(self.cfg.task, "save_predict", None):
             self._save_image(img, batch_idx)
         return img, fps
-
-    def _save_image(self, img, batch_idx):
-        save_image_path = Path(self.trainer.default_root_dir) / f"frame{batch_idx:03d}.png"
-        img.save(save_image_path)
-        print(f"💾 Saved visualize image at {save_image_path}")
