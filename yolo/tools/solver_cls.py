@@ -85,13 +85,6 @@ class TrainModel_CLS(ValidateModel_CLS):
         predicts = self(images)
         batch_size = len(images)
         loss = self.loss_fn(predicts["Main"], targets)
-        self.log_dict(
-            loss,
-            prog_bar=True,
-            on_epoch=True,
-            batch_size=batch_size,
-            rank_zero_only=True,
-        )
         self.log_dict(lr_dict, prog_bar=False, logger=True, on_epoch=False, rank_zero_only=True)
         return loss * batch_size
 
