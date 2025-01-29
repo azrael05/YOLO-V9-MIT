@@ -21,7 +21,7 @@ logger = logging.getLogger("timer")
 def main(cfg: Config):
     callbacks, loggers, save_path = setup(cfg)
     callbacks = []
-    print(cfg)
+
     if "cls" in cfg.model.name:
         cfg.weight = ""
     

@@ -7,6 +7,7 @@ from sklearn.metrics import accuracy_score
 import numpy as np
 from tqdm import tqdm
 import torch
+from sklearn.metrics import classification_report
 
 from yolo.config.config import Config
 from yolo.model.yolo import create_model
@@ -32,16 +33,28 @@ class ValidateModel_CLS(BaseModel):
             self.validation_cfg = self.cfg.task.validation
         self.val_loader = create_dataloader_cls(self.validation_cfg.data, self.cfg.dataset, self.validation_cfg.task)
         self.ema = self.model
+        # self.actual = []
+        # self.predicted = []
+        # self.length = len(self.val_loader)
+
     def val_dataloader(self):
         return self.val_loader
 
     def validation_step(self, batch, batch_idx):
+        # if len(self.predicted) == self.length:
+        #     self.predicted = []
+        #     self.actual = []
         images, targets = batch
         H, W = images.shape[2:]
         predicts = self.ema(images)
         # self.metric.update(
         #     [to_metrics_format(predict) for predict in predicts], [to_metrics_format(target) for target in targets]
         # )
+        # class_preds = torch.argmax(predicts["Main"], dim=1)
+        # for class_pred in class_preds:
+        #     self.predicted.append(class_pred)
+        # for target in targets:
+        #     self.actual.append(target)
         return predicts
 
     def on_validation_epoch_end(self):
@@ -54,6 +67,7 @@ class ValidateModel_CLS(BaseModel):
         #     rank_zero_only=True,
         # )
         # self.metric.reset()
+        # print(classification_report(self.actual, self.predicted))
         pass
 
 
@@ -66,6 +80,9 @@ class TrainModel_CLS(ValidateModel_CLS):
         time_taken = datetime.datetime.now() - start
         logger.critical(f"Dataloader creation time{time_taken}")
         print(len(self.train_loader))
+        self.aactual = []
+        self.ppredicted = []
+        self.full_length = len(self.train_loader)
 
     def train_dataloader(self):
         return self.train_loader
@@ -75,9 +92,17 @@ class TrainModel_CLS(ValidateModel_CLS):
         self.loss_fn = create_loss_function_cls(self.cfg)
 
     def on_train_epoch_start(self):
+        if self.aactual != []:
+            print(self.aactual)
+            print(self.ppredicted)
+            print(classification_report(self.aactual, self.ppredicted))
+            self.aactual = []
+            self.ppredicted = []
         self.trainer.optimizers[0].next_epoch(
             ceil(len(self.train_loader) / self.trainer.world_size), self.current_epoch
         )
+        self.aactual = []
+        self.ppredicted = []
 
     def training_step(self, batch, batch_idx):
         lr_dict = self.trainer.optimizers[0].next_batch()
@@ -85,7 +110,13 @@ class TrainModel_CLS(ValidateModel_CLS):
         predicts = self(images)
         batch_size = len(images)
         loss = self.loss_fn(predicts["Main"], targets)
-        self.log_dict(lr_dict, prog_bar=False, logger=True, on_epoch=False, rank_zero_only=True)
+        cclass_preds = torch.argmax(predicts["Main"], dim=1)
+        for cclass_pred in cclass_preds.detach().numpy():
+            self.ppredicted.append(cclass_pred)
+        for target in targets.detach().numpy():
+            self.aactual.append(np.argmax(target))
+        print(len(self.aactual), len(self.ppredicted))
+        # self.log_dict(lr_dict, prog_bar=False, logger=True, on_epoch=False, rank_zero_only=True)
         return loss * batch_size
 
     def configure_optimizers(self):
@@ -137,7 +168,9 @@ class InferenceModel_CLS(BaseModel):
     def predict_step(self, batch, batch_idx):
         images, labels = batch
         scores = self(images)
-        predicts = torch.argmax(scores, dim=0)
+        print(scores["Main"])
+        predicts = torch.argmax(scores["Main"], dim=1)
+        print(predicts)
         return predicts
         
         if getattr(self.predict_loader, "is_stream", None):

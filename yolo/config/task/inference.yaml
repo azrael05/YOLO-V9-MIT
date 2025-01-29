@@ -2,9 +2,12 @@ task: inference
 
 fast_inference:  # onnx, trt, deploy or Empty
 data:
-  source: demo/images/inference/image.png
+  source: E:\YOLO_V9\YOLO-V9-MIT\cd_dataset\images\train\cats\cat.1.jpg
   image_size: ${image_size}
   data_augment: {}
+  batch_size: 4
+  cpu_num : 1
+  pin_memory: False
 nms:
   min_confidence: 0.5
   min_iou: 0.5
